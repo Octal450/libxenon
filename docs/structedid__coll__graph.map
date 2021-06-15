@@ -1,0 +1,12 @@
+<map id="edid" name="edid">
+<area shape="rect" id="node1" title=" " alt="" coords="165,288,212,315"/>
+<area shape="rect" id="node2" href="$structest__timings.html" title=" " alt="" coords="5,199,95,225"/>
+<area shape="rect" id="node3" href="$structdetailed__timing.html" title=" " alt="" coords="267,199,377,225"/>
+<area shape="rect" id="node4" href="$structdetailed__non__pixel.html" title=" " alt="" coords="417,109,545,136"/>
+<area shape="rect" id="node5" href="$structdetailed__data__string.html" title=" " alt="" coords="721,13,859,39"/>
+<area shape="rect" id="node6" href="$structdetailed__data__monitor__range.html" title=" " alt="" coords="263,5,413,47"/>
+<area shape="rect" id="node7" href="$structcvt__timing.html" title=" " alt="" coords="437,13,519,39"/>
+<area shape="rect" id="node8" href="$structdetailed__data__wpindex.html" title=" " alt="" coords="543,13,696,39"/>
+<area shape="rect" id="node9" href="$structstd__timing.html" title=" " alt="" coords="154,13,237,39"/>
+<area shape="rect" id="node10" href="$structdetailed__pixel__timing.html" title=" " alt="" coords="249,109,392,136"/>
+</map>
