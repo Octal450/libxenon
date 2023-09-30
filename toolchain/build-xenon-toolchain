@@ -442,6 +442,7 @@ if [ "$1" == "toolchain" ]; then
     toolchain_install
     all_done
 elif [ "$1" == "libs" ]; then
+    libxenon_install
     zlib_install
     bzip2_install
     libpng_install
@@ -461,7 +462,7 @@ elif [ "$1" == "freetype" ]; then
 elif [ "$1" == "filesystems" ]; then
     filesystems_install
 elif [ "$1" == "bin2s" ]; then
-        bin2s_install
+    bin2s_install
 elif [ "$1" == "cube" ]; then
     cube
 else
