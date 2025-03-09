@@ -83,6 +83,7 @@
 struct sfc
 {
 	int initialized;
+	int phison;
 	int meta_type;
 
 	int page_sz;

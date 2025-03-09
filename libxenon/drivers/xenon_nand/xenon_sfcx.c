@@ -7,6 +7,8 @@
 #include <xb360/xb360.h>
 #include "xenon_sfcx.h"
 
+#include <string.h>
+
 struct sfc sfc = {0};
 unsigned char* blockbuf;
 //static unsigned char sfcx_page[MAX_PAGE_SZ];   //Max known hardware physical page size
@@ -22,8 +24,103 @@ unsigned long sfcx_readreg(int addr)
 	return __builtin_bswap32(*(volatile unsigned int*)(0xea00c000UL | addr));
 }
 
+static uint32_t sfcx_emmc_get_ints()
+{
+	return sfcx_readreg(0x30);
+}
+
+static void sfcx_emmc_clear_ints(uint32_t value)
+{
+	return sfcx_writereg(0x30, value);
+}
+
+void sfcx_emmc_clear_all_ints()
+{
+	uint32_t ints = sfcx_emmc_get_ints();
+	if (ints)
+		sfcx_emmc_clear_ints(ints);
+}
+
+static int sfcx_emmc_wait_ints(uint32_t value)
+{
+	while(1)
+	{
+		uint32_t ints = sfcx_emmc_get_ints();
+		if ((ints & value) == value)
+		{
+			sfcx_emmc_clear_ints(value);
+			return 0;
+		}
+	}
+}
+
+void sfcx_emmc_exec(uint32_t reg_4, uint32_t reg_8, uint32_t reg_c)
+{
+	sfcx_emmc_clear_all_ints();
+	sfcx_writereg(0x04, reg_4);
+	sfcx_writereg(0x08, reg_8);
+	sfcx_writereg(0x0C, reg_c);
+}
+
+static int sfcx_emmc_select_card()
+{
+	sfcx_emmc_exec(0, 0xffff0000, 0x71a0000);
+	return sfcx_emmc_wait_ints(1);
+}
+
+static int sfcx_emmc_deselect_card()
+{
+	sfcx_emmc_exec(0, 0, 0x7000000);
+	return sfcx_emmc_wait_ints(1);
+}
+
+static int sfcx_emmc_set_blocklen(int blocklen)
+{
+	sfcx_emmc_exec(0x200, blocklen, 0x101a0000);
+	return sfcx_emmc_wait_ints(1);
+}
+
+static int sfcx_read_page_emmc(uint8_t * buf, int address)
+{
+	int block = address / 0x200;
+	sfcx_emmc_exec(0x10200, block << 9, 0x113a0010);
+	int ret = sfcx_emmc_wait_ints(0x21);
+	if (!ret)
+	{
+		for (int i = 0; i < 0x200; i += 4)
+		{
+			uint32_t data = __builtin_bswap32(sfcx_readreg(0x20));
+			memcpy(buf + i, &data, 4);
+		}
+	}
+	return ret;
+}
+
+
+int sfcx_write_page_emmc(unsigned char *data, int address)
+{
+	int lba = address / 0x200;
+	sfcx_emmc_exec(0x10200, lba << 9, 0x183a0000);
+	int ret = 0;
+	sfcx_emmc_wait_ints(1);
+	{
+		for (int i = 0; i < 0x200; i += 4)
+		{
+			uint32_t d32;
+			memcpy(&d32, data + i, 4);
+			sfcx_writereg(0x20, __builtin_bswap32(d32));
+		}
+		ret = sfcx_emmc_wait_ints(0x12);
+	}
+	return ret;
+}
+
 int sfcx_read_page(unsigned char *data, int address, int raw)
 {
+	if (sfc.phison)
+	{
+		return sfcx_read_page_emmc(data, address);
+	}
 	int status;
 
 	sfcx_writereg(SFCX_STATUS, sfcx_readreg(SFCX_STATUS));
@@ -39,19 +136,6 @@ int sfcx_read_page(unsigned char *data, int address, int raw)
 
 	// Wait Busy
 	while ((status = sfcx_readreg(SFCX_STATUS)) & STATUS_BUSY);
-
-	if (!SFCX_SUCCESS(status))
-	{
-		if (status & STATUS_BB_ER)
-			printf(" ! SFCX: Bad block found at %08X\n", sfcx_address_to_block(address));
-		else if (status & STATUS_ECC_ER)
-		//	printf(" ! SFCX: (Corrected) ECC error at address %08X: %08X\n", address, status);
-			status = status;
-		else if (!raw && (status & STATUS_ILL_LOG))
-			printf(" ! SFCX: Illegal logical block at %08X (status: %08X)\n", sfcx_address_to_block(address), status);
-		else
-			printf(" ! SFCX: Unknown error at address %08X: %08X. Please worry.\n", address, status);
-	}
 
 	// Set internal page buffer pointer to 0
 	sfcx_writereg(SFCX_ADDRESS, 0);
@@ -73,6 +157,10 @@ int sfcx_read_page(unsigned char *data, int address, int raw)
 
 int sfcx_write_page(unsigned char *data, int address)
 {
+	if (sfc.phison)
+	{
+		return sfcx_write_page_emmc(data, address);
+	}
 	sfcx_writereg(SFCX_STATUS, 0xFF);
 
 	// Enable Writes
@@ -109,8 +197,6 @@ int sfcx_write_page(unsigned char *data, int address)
 	while (sfcx_readreg(SFCX_STATUS) & STATUS_BUSY);
 
 	int status = sfcx_readreg(SFCX_STATUS);
-	if (!SFCX_SUCCESS(status))
-		printf(" ! SFCX: Unexpected sfcx_write_page status %08X\n", status);
 
 	// Disable Writes
 	sfcx_writereg(SFCX_CONFIG, sfcx_readreg(SFCX_CONFIG) & ~CONFIG_WP_EN);
@@ -127,8 +213,6 @@ int sfcx_read_block(unsigned char *data, int address, int raw)
 	for (p = 0; p < sfc.pages_in_block; p++)
 	{
 		status |= sfcx_read_page(&data[p * page_sz], address + (p * sfc.page_sz), raw);
-		//if (!SFCX_SUCCESS(status))
-		//	break;
 	}
 	return status;
 }
@@ -141,14 +225,14 @@ int sfcx_write_block(unsigned char *data, int address)
 	for (p = 0; p < sfc.pages_in_block; p++)
 	{
 		status |= sfcx_write_page(&data[p * sfc.page_sz_phys], address + (p * sfc.page_sz));
-		//if (!SFCX_SUCCESS(status))
-		//	break;
 	}
 	return status;
 }
 
 int sfcx_erase_block(int address)
 {
+	if (sfc.phison)
+		return 0;
 	// Enable Writes
 	sfcx_writereg(SFCX_CONFIG, sfcx_readreg(SFCX_CONFIG) | CONFIG_WP_EN);
 	sfcx_writereg(SFCX_STATUS, 0xFF);
@@ -174,8 +258,7 @@ int sfcx_erase_block(int address)
 	while (sfcx_readreg(SFCX_STATUS) & STATUS_BUSY);
 
 	int status = sfcx_readreg(SFCX_STATUS);
-	//if (!SFCX_SUCCESS(status))
-	//	printf(" ! SFCX: Unexpected sfcx_erase_block status %08X\n", status);
+
 	sfcx_writereg(SFCX_STATUS, 0xFF);
 
 	// Disable Writes
@@ -389,271 +472,122 @@ int sfcx_rawaddress_to_block(int address)
         return address / sfc.block_sz_phys;
 }
 
-int rawflash_checkImage_meta(int len) {
-	int id = 0;
-	if (len >= 0x4410)
-	{
-		// Xenon, Falcon, Zephyr, JasperSB
-		id = ((blockbuf[sfc.page_sz  + 1] << 8) | blockbuf[sfc.page_sz]);
-		if ((id == 0) && (blockbuf[sfc.page_sz + 5] == 0xFF))
-		{
-			//FIXME! I cannot handle badblock on block 1 yet...
-			id = ((blockbuf[0x4401] << 8) | blockbuf[0x4400]);
-			if ((id == 1) && (blockbuf[0x4405] == 0xFF))
-			{
-				if (sfc.meta_type == META_TYPE_0)
-					return 0;
-			}
-			else if ((blockbuf[0x4405] != 0xFF))
-			{
-				printf(" ! Badblock on block 1 detected! Unable to check for META Type 0/1!\n");
-				return -3;
-			}
-		}
-		// Jasper, Trinity, Corona
-		id = ((blockbuf[sfc.page_sz + 2] << 8) | blockbuf[sfc.page_sz + 1]);
-		if ((id == 0) && (blockbuf[sfc.page_sz + 5] == 0xFF))
-		{
-			//FIXME! I cannot handle badblock on block 1 yet...
-			id = ((blockbuf[0x4402] << 8) | blockbuf[0x4401]);
-			if ((id == 1) && (blockbuf[0x4405] == 0xFF))
-			{
-				if (sfc.meta_type == META_TYPE_1)
-					return 0;
-			}
-		}
-	}
-	else
-	{
-		printf(" ! Bad incompatible size");
-		return -2;
-	}
-	if (len >= 0x4410)
-	{
-		// BigBlock Jasper (256 or 512)
-		id = ((blockbuf[0x4402] << 8) | blockbuf[0x4401]);
-		if ((id == 0) && (blockbuf[0x4400] == 0xFF))
-		{
-			if (sfc.meta_type == META_TYPE_2)
-			return 0;
-		}
-	}
-	else
-	{
-		printf(" ! Incompatible size\n");
-		return -2;
-	}
-	printf(" ! Bad meta data for this console type\n");
-	return -1;
-}
-
-int rawflash_checkImage_ecd_page(unsigned char* page) {
-	unsigned char ecd[4];
-	sfcx_calcecc_ex((unsigned int*)page, ecd);
-	if ((ecd[0] == page[0x20C]) && (ecd[1] == page[0x20D]) && (ecd[2] == page[0x20E]) && (ecd[3] == page[0x20F]))
-		return 0;
-	//printf("ecd[0] = 0x%x\necd[1] = 0x%x\necd[2] = 0x%x\necd[3] = 0x%x\n", ecd[0], ecd[1], ecd[2], ecd[3]);
-	//printf("page[0x20C] = 0x%x\npage[0x20D] = 0x%x\npage[0x20E] = 0x%x\npage[0x20F] = 0x%x\n", page[0x20C], page[0x20D], page[0x20E], page[0x20F]);
-	return -1;
-}
-
-int rawflash_checkImage_ecd(int len) {
-	int offset = 0;
-	int result = 0;
-	while (offset < len / 0x210)
-	{
-		if (rawflash_checkImage_ecd_page(&blockbuf[offset]) != 0)
-		{
-			printf(" ! Bad ECD detected on page %i\n", offset / 0x210);
-			result = -1; // Bad ECD, probably because there's no spare data?!
-		}
-		offset += 0x210;
-	}
-	return result;
-}
-
-int rawflash_checkImage(int f)
+void rwflash_write_nand(const char *filename)
 {
-	sfcx_init(); // Make sure sfcx is initalized!
-	int len = 0;
-	//if(sfc.meta_type == META_TYPE_2)
-		//len = 0x21210; //  257 pages
-	//else
-		len = 0x4410; //  33 pages	
-	blockbuf = malloc(len);
-	if(blockbuf == NULL)
+	int f = open(filename, O_RDONLY);
+	if (f < 0)
 	{
-		printf(" ! ERROR: unable to allocate 0x%x bytes for a buffer!\n", len);
-		return -1;
+		return; //Can't open file!
 	}
-	if (read(f, blockbuf, len) != len)
-	{
-		printf(" ! ERROR: Can't read enough data...");
-		free(blockbuf);
-		return -2;
-	}
-	if ((rawflash_checkImage_meta(len) != 0) || (rawflash_checkImage_ecd(len) != 0))
-	{
-		free(blockbuf);
-		return -1;
-	}
-	free(blockbuf);
-	return 0;
-}
 
-int rawflash_writeImage(int len, int f)
-{
-	int i=0;
-	int secondPgOffset = sfc.page_sz_phys;
-	int addr, addrphy, status, r;
-	int readsz = sfc.pages_in_block*sfc.page_sz_phys;
-	int numblocks = (len/sfc.block_sz_phys);
-	blockbuf = malloc(readsz);
-	if(blockbuf == NULL)
+	unsigned char buf[0x210], buf2[0x210];
+
+	int last = -1;
+	for (int p = 0; p < sfc.size_pages; )
 	{
-		printf("ERROR: unable to allocate 0x%x bytes for a buffer!\n", readsz);
-		return 0;
-	}
-	if(sfc.meta_type == META_TYPE_2)
-		secondPgOffset = 0x1080; // 0x210*8
-	while(i < numblocks)
-	{
-		printf("processing block 0x%04x of 0x%04x    \r", i+1, numblocks);
-		addr = i*sfc.block_sz;
-		// check first two pages of each block to find out if it's a good block
-		status = sfcx_read_block(blockbuf, addr, 1);
-		if((sfcx_is_pagevalid(blockbuf) == 0) || (sfcx_is_pagevalid(&blockbuf[secondPgOffset]) == 0))
-			status = status | STATUS_BB_ER;
-		r = read(f, blockbuf, readsz);
-		if (r < 0)
+		int cur = p / sfc.pages_in_block;
+		if (cur != last)
 		{
-			printf("ERROR: failed to read %d bytes from file\n\n",readsz);
-			return 0;
+			last = cur;
+			printf("\rwriting 0x%03X of 0x%03X", cur, sfc.size_blocks);
+			sfcx_erase_block(p * sfc.page_sz);
 		}
-		if((status & (STATUS_BB_ER|STATUS_ECC_ER)) != 0)
+		read(f, buf, sfc.page_sz_phys);
+		if (!sfcx_is_pageerased(buf) || sfc.phison)
 		{
-			printf("block 0x%x seems bad, status 0x%08x\n", i, status);
-			sfcx_erase_block(addr);
-			status = sfcx_erase_block(addr);
-			if (status == 0x200)
+			sfcx_write_page(buf, p * sfc.page_sz);
+			if (!sfc.phison)
 			{
-				printf("Block recovered! (A.K.A The block wasn't bad in the first place...)\n");
-				status = sfcx_write_block(blockbuf, addr);
+				sfcx_read_page(buf2, p * sfc.page_sz, 1);
+				if (memcmp(buf, buf2, sfc.page_sz_phys))
+				{
+					printf("\nerror - block 0x%03X write failed\n", cur);
+					memset(buf, 0, 0x210);
+					for (int k = cur * sfc.pages_in_block; k < (cur + 1) * sfc.pages_in_block; k++)
+					{
+						sfcx_write_page(buf, k * sfc.page_sz);
+					}
+					p = (cur + 1) * sfc.pages_in_block;
+					continue;
+				}
 			}
-			else
-				printf("Block cannot be recovered (A.K.A it's really bad)\n");
+			p++;
 		}
-		else
-		{
-			addr = i*sfc.block_sz_phys;
-			addrphy = i*sfc.block_sz;
-			sfcx_erase_block(addrphy);
-			status = sfcx_write_block(blockbuf, addrphy);
-		}
-		i++;
 	}
-	printf("\n\n");
-	return 1;
+
+	close(f);
+	printf("\nwrite done - power off now\n");
+	for(;;);
 }
 
 int try_rawflash(char *filename)
 {
-	struct stat s;
-
-	stat(filename, &s);
-	long size = s.st_size;
-	if (size <= 0)	
-		return -1; //Invalid Filesize
-
-	int f = open(filename, O_RDONLY);
-	if (f < 0)	
-		return f; //Can't open file!
-
-	printf(" * rawflash v5 started (by cOz, modified By Swizzy)\n");
-
-	if((size == (RAW_NAND_64*4)) || (size == (RAW_NAND_64*8))) // 256 or 512M NAND image, only flash 64M
-		size = RAW_NAND_64;
-	else if((size != 0x1080000)&& (size != RAW_NAND_64)) // 16 M size
+	if (!sfc.initialized)
 	{
-		printf("error: %s - size %d is not valid image size!\n", filename, size);
-		close(f);
+		printf("error - SFCX not init\n");
 		return -1;
 	}
 
-    printf("\n * found '%s'. press power NOW if you don't want to flash the NAND.\n",filename);
-    delay(15);
-
-	printf(" * Checking NAND File to be of matching type...\n");
-
-	if (rawflash_checkImage(f) != 0) {
-		printf(" ! Bad Image for this console... Please replace the file and try again...\n");
-		return -1;
+	if (sfc.phison)
+	{
+		sfcx_emmc_select_card();
+		sfcx_emmc_set_blocklen(0x200);
 	}
-	else	
-		printf(" * Image matches expected data...\n");	
 
-	close(f); // to re-align it to the start again
-	f = open(filename, O_RDONLY);
-	if (f < 0)	
-		return f; //Can't open file!
-        
-	printf("%s opened OK, attempting to write 0x%x bytes to flash...\n",filename, size);
-	if(rawflash_writeImage(size, f) == 1)
-		printf("image written, shut down now!\n");
-	else
-		printf("failed to write image :(\n");
+	rwflash_write_nand(filename);
 
-	close(f);
-	if(blockbuf != NULL)
-		free(blockbuf);
-        
-    for(;;); // loop
-    return -1;
+	if (sfc.phison)
+	{
+		sfcx_emmc_deselect_card();
+	}
+
+	return 0;
 }
 
-/*
-int sfcx_read_metadata_type(void)
+void sfcx_init_mmc(void)
 {
-	int bid = 0; //Block ID
+	sfc.initialized = 0;
+	sfc.phison = 1;
+	sfc.meta_type = 0;
+	sfc.page_sz = 0x200;
+	sfc.meta_sz = 0x0;
+	sfc.page_sz_phys = sfc.page_sz + sfc.meta_sz;
+	sfc.block_sz = 0x4000; // 16 KB
+	sfc.size_blocks = 0xC00;
+	sfc.size_bytes = sfc.size_blocks << 0xE;
+	sfc.size_usable_fs = 0xC00;
 
-	//Lets read what is actually on the nand
-	sfcx_read_page(sfcx_page, 0x8000, 1);
+	sfc.pages_in_block = sfc.block_sz / sfc.page_sz;
+	sfc.block_sz_phys = sfc.pages_in_block * sfc.page_sz_phys;
 
-	// Normal Xenon Type
-	bid = (sfcx_page[sfc.page_sz + 0x1] << 8) | (sfcx_page[sfc.page_sz + 0x0]);
-	if (bid == 2 && sfcx_page[sfc.page_sz + 0x5] == 0xFF){
-		return META_TYPE_0;
-	}
+	sfc.size_pages = sfc.size_bytes / sfc.page_sz;
+	sfc.size_blocks = sfc.size_bytes / sfc.block_sz;
 
-	// Jasper 16MB Small Block
-	bid = (sfcx_page[sfc.page_sz + 0x2] << 8) | (sfcx_page[sfc.page_sz + 0x1]);
-	if (bid == 2 && sfcx_page[sfc.page_sz + 0x5] == 0xFF){
-		return META_TYPE_1;
-	}
+	sfc.size_bytes_phys = sfc.block_sz_phys * sfc.size_blocks;
+	sfc.size_mb = sfc.size_bytes >> 20;
 
-	// Jasper 256/512 Large Block
-	bid = (sfcx_page[sfc.page_sz + 0x2] << 8) | (sfcx_page[sfc.page_sz + 0x1]);
-	if (bid == 0 && sfcx_page[sfc.page_sz + 0x0] == 0xFF){
-		return META_TYPE_2;
-	}
+	/*if (sfcx_emmc_select_card() || sfcx_emmc_set_blocklen(0x200))
+	{
+		printf("\nerror - failed to init MMC\n");
+	}*/
+	sfcx_writereg(0x2C, sfcx_readreg(0x2C) | (1 << 24));
 
-	return -1;
-
+	sfc.initialized = SFCX_INITIALIZED;
 }
-*/
 
 unsigned int sfcx_init(void)
-{
-	if ((xenon_get_PCIBridgeRevisionID() >= 0x70) && (sfcx_readreg(SFCX_PHISON) != 0)) {
-		printf(" ! SFCX: Unsupported Type - PHISON eMMC\n");
-		return 3;
-	}
-	
+{	
 	unsigned int config = sfcx_readreg(SFCX_CONFIG);
 
 	if (sfc.initialized) return config;
 
+	if ((xenon_get_PCIBridgeRevisionID() >= 0x70) && (sfcx_readreg(SFCX_PHISON) != 0)) {
+		sfcx_init_mmc();
+		return config;
+	}
+
 	sfc.initialized = 0;
+	sfc.phison = 0;
 	sfc.meta_type = 0;
 	sfc.page_sz = 0x200;
 	sfc.meta_sz = 0x10;
@@ -671,8 +605,8 @@ unsigned int sfcx_init(void)
 		switch ((config >> 4) & 0x3)
 		{
 		case 0: // Unsupported 8MB?
-			printf(" ! SFCX: Unsupported Type A-0\n");
-			delay(5);
+			//printf(" ! SFCX: Unsupported Type A-0\n");
+			//delay(5);
 			return 1;
 
 			//sfc.block_sz = 0x4000; // 16 KB
@@ -717,8 +651,8 @@ unsigned int sfcx_init(void)
 			{
 				// Unsupported
 				sfc.meta_type = META_TYPE_0;
-				printf(" ! SFCX: Unsupported Type B-0\n");
-				delay(5);
+				//printf(" ! SFCX: Unsupported Type B-0\n");
+				//delay(5);
 				return 2;
 			}
 			else
@@ -783,8 +717,8 @@ unsigned int sfcx_init(void)
 		break;
 
 	default:
-		printf(" ! SFCX: Unsupported Type\n");
-		delay(5);
+		//printf(" ! SFCX: Unsupported Type\n");
+		//delay(5);
 		return 3;
 	}
 
