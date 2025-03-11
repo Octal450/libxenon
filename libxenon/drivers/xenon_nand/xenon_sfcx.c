@@ -568,7 +568,7 @@ void sfcx_init_mmc(void)
 	sfc.size_bytes_phys = sfc.block_sz_phys * sfc.size_blocks;
 	sfc.size_mb = sfc.size_bytes >> 20;
 
-	sfcx_writereg(0x2C, sfcx_readreg(0x2C) | (1 << 24));
+	// sfcx_writereg(0x2C, sfcx_readreg(0x2C) | (1 << 24));
 
 	sfc.initialized = SFCX_INITIALIZED;
 }
