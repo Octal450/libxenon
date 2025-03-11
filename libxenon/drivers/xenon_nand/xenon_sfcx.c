@@ -489,30 +489,33 @@ void rwflash_write_nand(const char *filename)
 		if (cur != last)
 		{
 			last = cur;
-			printf("\rwriting 0x%03X of 0x%03X", cur, sfc.size_blocks);
+			printf("\rwriting block 0x%03X", cur);
 			sfcx_erase_block(p * sfc.page_sz);
 		}
-		read(f, buf, sfc.page_sz_phys);
+		int size = read(f, buf, sfc.page_sz_phys);
+		if (size != sfc.page_sz_phys)
+			break;
 		if (!sfcx_is_pageerased(buf) || sfc.phison)
 		{
 			sfcx_write_page(buf, p * sfc.page_sz);
-			if (!sfc.phison)
+			if (!sfc.phison && !sfcx_is_pagezeroed(buf))
 			{
 				sfcx_read_page(buf2, p * sfc.page_sz, 1);
 				if (memcmp(buf, buf2, sfc.page_sz_phys))
 				{
-					printf("\nerror - block 0x%03X write failed\n", cur);
+					printf("\nWARN: failed to write block 0x%03X\n", cur);
 					memset(buf, 0, 0x210);
 					for (int k = cur * sfc.pages_in_block; k < (cur + 1) * sfc.pages_in_block; k++)
 					{
 						sfcx_write_page(buf, k * sfc.page_sz);
 					}
 					p = (cur + 1) * sfc.pages_in_block;
+					lseek(f, p*sfc.page_sz_phys, SEEK_SET);
 					continue;
 				}
 			}
-			p++;
 		}
+		p++;
 	}
 
 	close(f);
@@ -527,7 +530,6 @@ int try_rawflash(char *filename)
 		printf("error - SFCX not init\n");
 		return -1;
 	}
-
 	if (sfc.phison)
 	{
 		sfcx_emmc_select_card();
@@ -566,10 +568,6 @@ void sfcx_init_mmc(void)
 	sfc.size_bytes_phys = sfc.block_sz_phys * sfc.size_blocks;
 	sfc.size_mb = sfc.size_bytes >> 20;
 
-	/*if (sfcx_emmc_select_card() || sfcx_emmc_set_blocklen(0x200))
-	{
-		printf("\nerror - failed to init MMC\n");
-	}*/
 	sfcx_writereg(0x2C, sfcx_readreg(0x2C) | (1 << 24));
 
 	sfc.initialized = SFCX_INITIALIZED;
