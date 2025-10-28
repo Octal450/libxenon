@@ -26,18 +26,18 @@ void xenon_config_init(void)
 
 	uint32_t addr = 0;
 	
+	sfcx_init();
+	if(sfc.initialized != SFCX_INITIALIZED)
+	{
+		printf(" ! config: sfcx not initialized\n"); //Incompatible model found?!
+		return;
+	}
+
 	if (xenon_get_console_type() == REV_CORONA_PHISON)
 		addr = PHISON_STATIC_CONFIG_ADDR;
 	else
 	{
-		sfcx_init();
-		if(sfc.initialized != SFCX_INITIALIZED)
-		{
-			printf(" ! config: sfcx not initialized\n"); //Incompatible model found?!
-			return;
-		}
-		else
-			addr = sfc.addr_config + (BLOCK_OFFSET * sfc.block_sz) + sfc.page_sz; //Get Adress based on SFC type
+		addr = sfc.addr_config + (BLOCK_OFFSET * sfc.block_sz) + sfc.page_sz; //Get Adress based on SFC type
 	}
 	xenon_get_logical_nand_data(&secured_settings, addr, sizeof secured_settings);
 	xenon_config_initialized=1;
